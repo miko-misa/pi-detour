@@ -1,111 +1,159 @@
-# pi-tangent 設計資料 — 「worktree未満・steering以上」の会話フォーク&マージ
+# pi-detour 設計 v5 — native InteractiveMode sessions
 
-作成: 2026-08-15(v2: 自己完結アーキテクチャに全面改訂)。実装はPi環境で行う想定の設計書。
+更新: 2026-08-15。対象: Pi 0.84.2。
 
-## 0. 依存方針(最重要)
+## 1. 決定事項
 
-- **pi-tangent は単体で完結する。** 前提とするのは Pi 本体(`@earendil-works/pi-coding-agent`)の文書化された機能のみ:
-  - CLI: `--mode rpc`、`--fork <session>`、`-e <extension>`、`--no-session` 等
-  - 拡張API: `registerCommand` / `registerShortcut` / `pi.on("input")` / `ctx.ui.setWidget` / `appendEntry` + `registerEntryRenderer` / `pi.sendMessage` / `ctx.sessionManager`
-- **他拡張(pi-subagents 等)への依存は持たない。** この拡張だけを入れるユーザーで全機能が動くこと
-- 他拡張との関係は「競合の回避」と「存在する場合の任意連携」のみ(§7)。連携が無くても機能は欠けない
-- 既存機能は改変しない: Pi本体のセッションfork(別タブUI)、pi-subagents はそのまま。pi-tangent は純粋な追加
+- v1はmain 1本とdetour 1本。
+- 両方を同一Node/Pi process内の独立した `AgentSessionRuntime` として保持する。
+- 各sessionはPi標準の `InteractiveMode` を持つ。会話画面を独自実装しない。
+- 選択中の `InteractiveMode` だけがterminalを所有する。非表示sessionはTUIを停止するがagent runtimeは継続できる。
+- detourはmainのsafe leafから `SessionManager.createBranchedSession()` でforkする。
+- mainとdetourは同じcwd/repositoryを参照する。worktreeやrepository copyは作らない。
+- detourのbuilt-in `bash`、`edit`、`write` tool callをblockする。
+- mergeは明示的なcommandだけが実行し、最終handoff 1件だけをmainへ配送する。
+- product、package、GitHub repositoryの正式名は `pi-detour`。local checkout directory名は動作に影響しない。
 
-## 1. 目的と要件
+## 2. なぜnative sessionか
 
-メイン会話を汚さずに、脇道の調査・相談を並行して行い、最後に成果だけを合流させる。
+旧方式はRPC childのJSONLを読み、独自overlayへtranscript、editor、tool summaryを描画していた。この方式ではmainに導入済みのrenderer、editor、slash command、theme、extension UIとdetourの表示が一致しない。
 
-1. **fork**: 分岐時点までのメイン会話の全文脈を子が共有する
-2. **rally**: 子と何往復でもやり取りできる。この間メイン文脈には一切入らない。**入力は通常のプロンプトそのまま**(モード方式、per-messageコマンドなし)
-3. **merge**: 「何をどうメインに入れるか」を子のモデルが構成し(指示があれば従う)、メイン文脈のきれいな境界に挿入される。**merge は子との会話の中で自然言語で頼めるのが本命**
-4. **非破壊既定**: 子は既定で読み取り専用ツールのみ(バリアントで解除可)
-5. 画面は切り替わらない。メインと tangent の行き来は TUI(ショートカット+インジケータ)で
+現方式は [`pi-parallel-sessions` 0.2.8](https://github.com/liushihao456/pi-sessions) のMIT実装で実証されたterminal handoffを採用する。`pi-subagents` FleetViewのようなtranscript projectionは使わない。会話描画はmain/detourともPi本体だけが行う。
 
-## 2. アーキテクチャ(自己完結)
+## 3. Runtime構成
 
-```
-[メインPi + pi-tangent拡張]
-  /tangent <依頼>
-    │ 1. ctx.sessionManager で現行セッションをディスクへ保存(フラッシュ)
-    │ 2. 子プロセスを spawn:
-    │      pi --mode rpc --fork <現行セッションファイル> \
-    │         -e <pkg>/child/merge-tool.ts [--tools read,grep,find,ls,...]
-    │    → 子 = メイン全文脈を持つ独立Piプロセス(生かしたまま保持)
-    ▼
-[tangent子 (RPCプロセス)]
-  rally: 親拡張が RPC `prompt` で入力を転送、イベントストリームで応答受信
-  実行中の割り込み: RPC `steer`
-  merge: 子モデルが merge_to_main ツールを呼ぶ(下記)
-    │ 親は子のRPCイベントで tool_call(merge_to_main) を観測し content を取得
-    ▼
-[メイン文脈への挿入]
-  pi.sendMessage({customType: "tangent-merge", content, display: true},
-                 { deliverAs: "followUp" })
-  → メインがアイドルになった境界で合流。走行中のメインを妨げない
+```text
+single Pi process
+├── main AgentSessionRuntime
+│   └── native InteractiveMode (active or TUI-suspended)
+├── detour AgentSessionRuntime
+│   └── native InteractiveMode (active or TUI-suspended)
+└── NativeSessionHost
+    ├── active session id
+    ├── current ExtensionAPI/context per session
+    └── terminal handoff lifecycle
 ```
 
-- 子プロセスは tangent の寿命の間ずっと生存(rallyごとの再起動なし)。`/tangent-close` または merge 後の任意クローズで終了
-- 子は普通の Pi なので、ユーザーの settings.json のスキル・拡張・テーマがそのまま効く(必要なら `--no-extensions` 等で絞る)
-- 子の応答表示: RPC イベントを `appendEntry`(+`registerEntryRenderer`)で**TUI専用エントリ**としてメインのトランスクリプトに描画。メインの LLM 文脈には入らない
+mainからdetourへ移る時だけ、`ctx.ui.custom()` を空componentで開いてparent TUI handleを取得する。そのcomponentは会話を一切renderしない。parent TUIをstopし、child `InteractiveMode.run()` / `ui.start()`へterminal ownershipを渡す。mainへ戻る時は逆順でchild UIをstopし、parent TUIをstartして空componentをcloseする。
 
-## 3. UXとコマンド(確定仕様)
+これはPi 0.84.2にlive-session focus APIがないためのbridgeである。Pi issue #830/#5700でも同じcore API不足が確認されている。
 
-- `/tangent <task>` — tangent を生成し **tangentモード**に入る
-- **tangentモード**: 通常のプロンプト入力がすべて tangent へ。`pi.on("input")` で捕捉しメインへの配送をブロック(不可なら `CustomEditor` 方式へフォールバック)。ラリー中もメインは裏で実行継続可
-- **TUI切替**: `pi.registerShortcut` の1キーで main ↔ tangent トグル(複数はサイクル)。エディタ上部の常設ウィジェットで `[main] [t1: 認証調査*]` のように入力先を常時明示。※枠色は zentui 等のエディタ系拡張が使う領域なので使わない(§7)
-- **`merge_to_main(content, note?)` ツール(merge の本命)**: 同梱の子専用ミニ拡張(`-e` でロード)が提供。ラリー中に「これをメインに入れて」と頼むと子モデルが handoff を構成して呼ぶ
-- `/tangent-merge [指示]` — merge の明示発火(フォールバック。どちらのモードからでも)
-- `/tangent-rally <text>` — モードに入らず1発だけ投げる省略形
-- `/tangent-exit`(エイリアス `/main`)、`/tangent-close [id]`、`/tangents`(一覧、appendEntry表示)
-- コマンドは `tangent` 接頭辞の一家に統一(汎用名の衝突回避+補完でのグルーピング)
+## 4. Forkとresource parity
 
-## 4. 非破壊性
+`/detour <task>` または `/detour open <task>`:
 
-既定の子は `--tools read,grep,find,ls,web_search,fetch_content,get_search_content`(+merge_to_main)で起動。
-`/tangent --rw <task>` で書き込み可バリアント。web系ツールはユーザーが該当拡張を入れている場合のみ存在する
-(無ければ Pi が単に無視するか、起動時に利用可能ツールへ絞る — 要検証9)。
+1. main session file実在とcurrent leafを確認する。main agentがworking中ならactive turn直前のsafe leafを使い、unresolved tool callをdetourへ持ち込まない。
+2. main session fileを別の `SessionManager` でopenする。
+3. safe leafまでを `createBranchedSession()` で新sessionへ抽出する。assistant messageがまだないbranchではdeferred persistenceをそのまま使う。
+4. mainのmodel、thinking level、selected toolsを継承する。
+5. `SettingsManager` と `createAgentSessionServices()` で同じcwdのglobal/project/package resourcesを再読込する。mainと同じbuilt-in provider extensions（llama.cpp等）も注入するため、`getPackageDir()/dist/extensions/index.js` の `builtInExtensions` をcached dynamic importする。
+6. `parseArgs(process.argv.slice(2))` からCLI extension/skill/prompt/theme source、no-* flags、system prompt、extension flagsをchild loaderへ渡す。npm/git/URL sourceも保持する。
+7. `import.meta.url` から得たpi-detour自身のabsolute extension pathを常に追加する。
+8. CLI `--models`、`--api-key` をchild model runtimeへ、`--tui-mode`、`--use-theme` をchild `InteractiveMode` へ適用する。
+9. child runtimeとnative `InteractiveMode` を作り、taskをinitial messageとして開始する。
 
-## 5. 実装ステップ
+extension instanceはsessionごとに別だが、通常のPi resource discoveryを通るため、renderer、commands、widgets、themes、context filesはchildにもloadされる。
 
-1. 骨格: `/tangent` → 子spawn(--fork)→ RPC prompt/イベント受信 → appendEntry 表示(モードなし、/tangent-rally 相当のみ)
-2. tangentモード: input捕捉+ブロック、切替ショートカット、インジケータウィジェット
-3. merge: 子ミニ拡張 merge_to_main + 親の tool_call 観測 + sendMessage(followUp)
-4. 複数tangent、/tangents、/tangent-close、クラッシュ/孤児プロセス処理
-5. Claude敵対レビュー → dotagents の packages.txt へ追加して配布(作者環境)
+## 5. Command UXとparallel execution
 
-## 6. 要検証項目(着手順)
+Public namespaceはuniversal root command `/detour` 1個だけにする。
 
-1. **`--fork` の対象**: 実行中セッションのファイルを fork できるか。`ctx.sessionManager` に「現在のセッションパス取得」「明示保存(フラッシュ)」があるか(Pi本体 docs/extensions.md の SessionManager 節)。fork はスナップショットであり、以後の親の進行は子に反映されない(仕様として明記)
-2. **RPCモードの実際**: `pi --mode rpc` の起動フラグ併用(`--fork` / `-e` / `--tools` / `--no-session`?)、イベントストリームの形式、tool_call イベントから引数(merge content)を取れるか(Pi本体 docs/rpc.md)
-3. **input イベントのブロック可否**: tangentモードの成立条件。`pi.on("input")` がハンドラから入力の消費/抑止を返せるか。Ponytail の実装が参考(`~/.pi/agent/npm/node_modules/@dietrichgebert/ponytail/pi-extension/index.js`)。不可なら CustomEditor
-4. **ショートカットとウィジェット**: キー選定(Ctrl+T=thinking、Ctrl+P=モデル巡回等と衝突しないこと)。`ctx.ui.setWidget` で常設タブ表示が成立するか
-5. **子の資源**: tangent 1つ = Pi プロセス1つ。メモリ/起動時間の実測、孤児プロセス防止(親終了時のkill、セッション再開時の再接続 or 破棄)
-6. **子のセッション永続化**: 子を `--no-session` にするか、保存して「後から tangent を再開」を許すか(v1 は揮発でよい)
-7. **merge の冪等性**: sendMessage(followUp) がメイン走行中に積まれた場合の配送タイミング確認(アイドル後、と本体docsに明記あり)
-8. **コスト**: fork = 親全文の prefix を子の各ターンで再送。プロバイダーのキャッシュで緩和されることをログ(cacheRead)で確認。巨大セッションからの fork には警告表示を検討
-9. **--tools と拡張ツールの関係**: 許可リストに存在しないツール名を指定した場合の挙動
+```text
+/detour <task>                  no detour: create + focus
+/detour open <task>             explicit create
+/detour                         active detour: switch focus
+/detour switch                  explicit switch
+/detour send <message>          follow-up without focus change
+/detour merge [instructions]    final handoff + close
+/detour close                   discard + close
+/detour status                  report state/focus
+```
 
-## 7. 他拡張との棲み分け(依存ではなく共存)
+DETOUR sessionだけにはcontextual `/merge`、`/close`、`/main` も動的登録する。MAINには登録しない。legacy aliasesとextension shortcutは登録しない。
 
-| 拡張 | 関係 | 方針 |
-|---|---|---|
-| pi-subagents | 同種の子実行系を持つが**別システム**。コマンド名・ツール名は衝突しない(subagent / *-fleet 系 vs tangent-*) | 併存可。任意連携(FleetView への表示登録)は**将来のオプション**とし、v1 では行わない |
-| zentui / エディタ系 | 入力欄の枠色・装飾を所有 | tangentモードの表示は枠色を使わず、独自ウィジェット+ステータスで行う |
-| tool-display | ツール行の描画を所有 | tangent の表示は appendEntry(独自エントリ型)なので干渉しない |
-| atelier / フッター系 | フッター/サイドバー | 使用しない。将来、サイドバーパネル(公開プロトコル)への任意表示をオプションで検討 |
-| herdr | ペイン状態 | 依存しない。子プロセスは親 Pi の中で完結する |
+- `/detour <task>` とswitchはactive sessionのagentがworking中でも実行できる。
+- focused sessionのnative TUI editor下へstandard extension widgetで常に `[MAIN]` または `[DETOUR]` を表示する。
+- hidden sessionのagent/runtimeは継続する。
+- hidden sessionのTUIはrenderしない。再focus時にnative `requestRender(true)` で再描画する。
 
-## 8. 参考(確認済みの一次情報)
+## 6. Merge
 
-- Pi RPC モード: `prompt`(streamingBehavior: steer/followUp 指定可)、`steer`、`follow_up`、`abort`、`new_session`、`get_state`、`get_messages` — Pi本体 docs/rpc.md で確認済み
-- `pi --fork <path|id>` は Pi 本体の公開 CLI フラグ(--help で確認済み)
-- `pi.sendMessage` の followUp 配送は「エージェントがアイドルになった後」に処理(docs/extensions.md)
-- `pi.on("input")` は Ponytail が使用実績あり(ブロック可否のみ未確認)
-- appendEntry + registerEntryRenderer で「LLM文脈に入らないTUI専用の恒久表示」が可能(作者の別拡張で実証済み)
+`/detour merge [instructions]` またはDETOUR内の `/merge [instructions]`:
 
-## 付録: pi-subagents を使った先行プロトタイプ(任意)
+1. detourへfinal handoffだけを返すpromptを常に`followUp`として送る。
+2. `AgentSession.waitForIdle()` でqueueを含むsettleを待つ。
+3. prompt送信前のmessage boundary以降で、UUID marker付きhandoff user messageに属するassistant outputだけを採用し、markerを除去する。以前のassistant responseへfallbackしない。
+4. detourがactiveならmainへfocusを戻す。
+5. mainのExtensionAPIが利用可能なことを確認し、`followUp + triggerTurn: true` でhandoffを1件送る。
+6. 配送後にdetour `InteractiveMode` とruntimeをstop/disposeする。
 
-作者環境には pi-subagents が入っているため、製品実装前の**体験検証**としては同フレームワークの
-`defaultContext: fork` + retained children `resume` + steer で近い体験を数分で試せる
-(agents/*.md 1枚。詳細は pi-subagents docs/agents.md, extension-api.md)。
-ただしこれはプロトタイプ専用であり、**製品の pi-tangent は上記の自己完結アーキテクチャで実装する**。
+merge中はsendと重複mergeを拒否する。main shutdownが先に成立した場合はhandoffを送らない。childにautonomous merge toolは登録しない。
+
+## 7. Mutation policy
+
+childの `tool_call` hookで `bash`、`edit`、`write` をblockする。さらに `user_bash` をsynthetic failureで処理し、native editorの `!` / `!!` も実行しない。
+
+mainは制限しない。これはbuilt-in tool policyでありsandboxではない。副作用metadataがPi tool schemaにないため、arbitrary custom tool、extension command、background extension、external editor/processのwriteは防げない。
+
+## 8. Lifecycle
+
+- process-global hostは `WeakMap<SessionManager, ownerId>` でruntime ownershipを保持し、focus状態からownerを推測しない。
+- owner idを束縛したruntime factoryによりchild内の `/new`、`/resume`、`/fork` 後もdetour ownershipを維持する。
+- live main/detourが互いのsession fileを `/resume` する操作は拒否する。
+- child interactive `/quit`、Ctrl+D、double-Ctrl+Cはprocessを終了せずdetourだけをstopしてmainをrestoreする。childはprocess signal handlerを登録せず、main `InteractiveMode`だけがSIGTERM/SIGHUPを処理し、そのshutdown hookからchildも直列にdisposeする。
+- mainの `new` / `resume` / `fork` ではdetourを保持し、新main extension instanceをrebindする。
+- mainの `quit` / `reload` ではchild runtimeをdisposeしterminal ownershipをrestoreする。
+- shutdownはcreation待ちでblockしない。starting recordへ同期的にcancellation flagを立て、late runtimeは生成側でdisposeする。
+- unexpected child `InteractiveMode.run()` rejection/resolutionはmain terminalをrestoreし、childをdisposeしてmainへ通知する。
+- stop/disposeはidempotentにする。
+
+## 9. Files
+
+```text
+src/index.ts          command routing, merge, tool policy
+src/live-sessions.ts  AgentSessionRuntime/InteractiveMode host and terminal handoff
+src/session-logic.ts  pure routing/policy/parser helpers
+```
+
+旧custom screen、RPC client、child projection、JSONL/control protocol、mutation lease stateは不要なので保持しない。
+
+## 10. Validation
+
+Automated:
+
+- command parsing and contextual dispatch decisions
+- restricted tool classification
+- final handoff selection
+- complete CLI resource/source and extension-flag inheritance
+- runtime ownership mapping and main replacement policy
+- TypeScript typecheck and package tests
+- parent/extension RPC loading smoke
+- npm package dry-run and `git diff --check`
+
+Manual real-terminal smoke:
+
+1. main working中にdetourを作成し、mainがhiddenで完了する。
+2. detour working中にmainへ戻り、detourがhiddenで完了する。
+3. 両sessionで通常のPi transcript、editor、tool renderer、extension UIが表示される。
+4. regular/fullscreenの両方で `/detour` switchとchild closeを繰り返し、raw mode/cursor/keyboard protocolが壊れず、terminal titleがactive sessionからmainへ復元される。
+5. DETOURのみ `/merge`、`/close`、`/main` が存在し、TUI role indicatorが正しい。
+6. childのbash/edit/writeがblockされ、mainでは実行できる。
+7. merge、send、close、quit、reload、SIGTERM/SIGHUPを確認する。
+
+## 11. 残存リスク
+
+- `InteractiveMode.ui`、`start()` / `stop()` / `updateTerminalTitle()`、child instanceのprivate `shutdown()` / `registerSignalHandlers()` patch、およびbuilt-in provider parity用の `dist/extensions/index.js` はPi implementation detailであり、Pi updateで壊れ得る。
+- Pi coreはまだ複数live sessionのpublic focus APIを提供していない。
+- hidden extensionがmodal UIやterminal title/progressを直接操作する場合、terminal ownershipと競合する可能性がある。
+- detour custom tools/commandsとexternal processの副作用はblockできない。
+- IME、paste、scroll、terminal recoveryは実端末確認が必要。
+
+## 12. References
+
+- Pi 0.84.2 `docs/sdk.md`, `docs/extensions.md`, `InteractiveMode`
+- [`liushihao456/pi-sessions`](https://github.com/liushihao456/pi-sessions), npm `pi-parallel-sessions` 0.2.8, MIT
+- Pi issue [#830](https://github.com/earendil-works/pi/issues/830)
+- Pi issue [#5700](https://github.com/earendil-works/pi/issues/5700)
+- [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams)
+- [OpenCode agents](https://opencode.ai/docs/agents/)
+- [Codex CLI multi-agent TUI](https://github.com/openai/codex/tree/main/codex-rs/tui/src)
