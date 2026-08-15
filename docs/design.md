@@ -1,136 +1,111 @@
-# tangent agent 設計資料 — 「worktree未満・steering以上」の会話ブランチ&マージ
+# pi-tangent 設計資料 — 「worktree未満・steering以上」の会話フォーク&マージ
 
-作成: 2026-08-15。実装はPi環境(Codex実装+Claude敵対レビュー)で行う想定の設計書。
+作成: 2026-08-15(v2: 自己完結アーキテクチャに全面改訂)。実装はPi環境で行う想定の設計書。
 
-## 0. 用語と非目標(重要)
+## 0. 依存方針(最重要)
 
-- 本設計の「fork」は **pi-subagents の起動オプション `context: fork`**(起動時に親の会話履歴を子のコンテキストへコピーする)を指す。**Pi本体のセッションfork(ダブルEsc/`--fork`、別タブに切り替わる機能)は一切使わない**。tangent は最初から最後まで「普通のasyncサブエージェント」として存在し、画面は切り替わらない
-- **既存機能は改変しない**。Pi本体のfork、pi-subagentsのビルトインagent(scout/worker等)、subagentツールはそのまま残す。tangentは新規のagent定義1枚+新規の拡張1本の**純粋な追加**であり、依存するのは文書化された公開インターフェース(agent定義、delegation API、pi.sendMessage)のみ
+- **pi-tangent は単体で完結する。** 前提とするのは Pi 本体(`@earendil-works/pi-coding-agent`)の文書化された機能のみ:
+  - CLI: `--mode rpc`、`--fork <session>`、`-e <extension>`、`--no-session` 等
+  - 拡張API: `registerCommand` / `registerShortcut` / `pi.on("input")` / `ctx.ui.setWidget` / `appendEntry` + `registerEntryRenderer` / `pi.sendMessage` / `ctx.sessionManager`
+- **他拡張(pi-subagents 等)への依存は持たない。** この拡張だけを入れるユーザーで全機能が動くこと
+- 他拡張との関係は「競合の回避」と「存在する場合の任意連携」のみ(§7)。連携が無くても機能は欠けない
+- 既存機能は改変しない: Pi本体のセッションfork(別タブUI)、pi-subagents はそのまま。pi-tangent は純粋な追加
 
 ## 1. 目的と要件
 
 メイン会話を汚さずに、脇道の調査・相談を並行して行い、最後に成果だけを合流させる。
 
 1. **fork**: 分岐時点までのメイン会話の全文脈を子が共有する
-2. **rally**: 子と数往復のやり取りができる(質問・追加指示・結果の練り直し)。この間メイン文脈には一切入らない
-3. **merge**: 最終的に「何をどうメインに入れるか」を子のモデルが構成し(指示があれば従い、なければ要点を自動選別)、メイン文脈のきれいな境界に挿入される
-4. **統一的な枠組み**: 特殊なUIではなく「普通のサブエージェント」として見える。FleetView・`/subagents-fleet`インスペクタ・steer・Herdrペインメタデータにそのまま乗る
-5. 非破壊バリアント: 読み取り専用ツールのみの分岐も選べる
+2. **rally**: 子と何往復でもやり取りできる。この間メイン文脈には一切入らない。**入力は通常のプロンプトそのまま**(モード方式、per-messageコマンドなし)
+3. **merge**: 「何をどうメインに入れるか」を子のモデルが構成し(指示があれば従う)、メイン文脈のきれいな境界に挿入される。**merge は子との会話の中で自然言語で頼めるのが本命**
+4. **非破壊既定**: 子は既定で読み取り専用ツールのみ(バリアントで解除可)
+5. 画面は切り替わらない。メインと tangent の行き来は TUI(ショートカット+インジケータ)で
 
-## 2. 調査結果: 必要部品はほぼすべて pi-subagents に存在する
+## 2. アーキテクチャ(自己完結)
 
-実装前に必ず以下のローカルドキュメントを読むこと(バージョン: pi-subagents v0.49系で確認):
+```
+[メインPi + pi-tangent拡張]
+  /tangent <依頼>
+    │ 1. ctx.sessionManager で現行セッションをディスクへ保存(フラッシュ)
+    │ 2. 子プロセスを spawn:
+    │      pi --mode rpc --fork <現行セッションファイル> \
+    │         -e <pkg>/child/merge-tool.ts [--tools read,grep,find,ls,...]
+    │    → 子 = メイン全文脈を持つ独立Piプロセス(生かしたまま保持)
+    ▼
+[tangent子 (RPCプロセス)]
+  rally: 親拡張が RPC `prompt` で入力を転送、イベントストリームで応答受信
+  実行中の割り込み: RPC `steer`
+  merge: 子モデルが merge_to_main ツールを呼ぶ(下記)
+    │ 親は子のRPCイベントで tool_call(merge_to_main) を観測し content を取得
+    ▼
+[メイン文脈への挿入]
+  pi.sendMessage({customType: "tangent-merge", content, display: true},
+                 { deliverAs: "followUp" })
+  → メインがアイドルになった境界で合流。走行中のメインを妨げない
+```
 
-- `~/.pi/agent/npm/node_modules/pi-subagents/docs/agents.md`
-- `~/.pi/agent/npm/node_modules/pi-subagents/docs/extension-api.md`
-- `~/.pi/agent/npm/node_modules/pi-subagents/docs/tool-reference.md`
-- `~/.pi/agent/npm/node_modules/pi-subagents/docs/observability.md`
+- 子プロセスは tangent の寿命の間ずっと生存(rallyごとの再起動なし)。`/tangent-close` または merge 後の任意クローズで終了
+- 子は普通の Pi なので、ユーザーの settings.json のスキル・拡張・テーマがそのまま効く(必要なら `--no-extensions` 等で絞る)
+- 子の応答表示: RPC イベントを `appendEntry`(+`registerEntryRenderer`)で**TUI専用エントリ**としてメインのトランスクリプトに描画。メインの LLM 文脈には入らない
 
-確認済みの既存機能と、要件との対応:
+## 3. UXとコマンド(確定仕様)
 
-| 要件 | 既存機能 | 出典 |
+- `/tangent <task>` — tangent を生成し **tangentモード**に入る
+- **tangentモード**: 通常のプロンプト入力がすべて tangent へ。`pi.on("input")` で捕捉しメインへの配送をブロック(不可なら `CustomEditor` 方式へフォールバック)。ラリー中もメインは裏で実行継続可
+- **TUI切替**: `pi.registerShortcut` の1キーで main ↔ tangent トグル(複数はサイクル)。エディタ上部の常設ウィジェットで `[main] [t1: 認証調査*]` のように入力先を常時明示。※枠色は zentui 等のエディタ系拡張が使う領域なので使わない(§7)
+- **`merge_to_main(content, note?)` ツール(merge の本命)**: 同梱の子専用ミニ拡張(`-e` でロード)が提供。ラリー中に「これをメインに入れて」と頼むと子モデルが handoff を構成して呼ぶ
+- `/tangent-merge [指示]` — merge の明示発火(フォールバック。どちらのモードからでも)
+- `/tangent-rally <text>` — モードに入らず1発だけ投げる省略形
+- `/tangent-exit`(エイリアス `/main`)、`/tangent-close [id]`、`/tangents`(一覧、appendEntry表示)
+- コマンドは `tangent` 接頭辞の一家に統一(汎用名の衝突回避+補完でのグルーピング)
+
+## 4. 非破壊性
+
+既定の子は `--tools read,grep,find,ls,web_search,fetch_content,get_search_content`(+merge_to_main)で起動。
+`/tangent --rw <task>` で書き込み可バリアント。web系ツールはユーザーが該当拡張を入れている場合のみ存在する
+(無ければ Pi が単に無視するか、起動時に利用可能ツールへ絞る — 要検証9)。
+
+## 5. 実装ステップ
+
+1. 骨格: `/tangent` → 子spawn(--fork)→ RPC prompt/イベント受信 → appendEntry 表示(モードなし、/tangent-rally 相当のみ)
+2. tangentモード: input捕捉+ブロック、切替ショートカット、インジケータウィジェット
+3. merge: 子ミニ拡張 merge_to_main + 親の tool_call 観測 + sendMessage(followUp)
+4. 複数tangent、/tangents、/tangent-close、クラッシュ/孤児プロセス処理
+5. Claude敵対レビュー → dotagents の packages.txt へ追加して配布(作者環境)
+
+## 6. 要検証項目(着手順)
+
+1. **`--fork` の対象**: 実行中セッションのファイルを fork できるか。`ctx.sessionManager` に「現在のセッションパス取得」「明示保存(フラッシュ)」があるか(Pi本体 docs/extensions.md の SessionManager 節)。fork はスナップショットであり、以後の親の進行は子に反映されない(仕様として明記)
+2. **RPCモードの実際**: `pi --mode rpc` の起動フラグ併用(`--fork` / `-e` / `--tools` / `--no-session`?)、イベントストリームの形式、tool_call イベントから引数(merge content)を取れるか(Pi本体 docs/rpc.md)
+3. **input イベントのブロック可否**: tangentモードの成立条件。`pi.on("input")` がハンドラから入力の消費/抑止を返せるか。Ponytail の実装が参考(`~/.pi/agent/npm/node_modules/@dietrichgebert/ponytail/pi-extension/index.js`)。不可なら CustomEditor
+4. **ショートカットとウィジェット**: キー選定(Ctrl+T=thinking、Ctrl+P=モデル巡回等と衝突しないこと)。`ctx.ui.setWidget` で常設タブ表示が成立するか
+5. **子の資源**: tangent 1つ = Pi プロセス1つ。メモリ/起動時間の実測、孤児プロセス防止(親終了時のkill、セッション再開時の再接続 or 破棄)
+6. **子のセッション永続化**: 子を `--no-session` にするか、保存して「後から tangent を再開」を許すか(v1 は揮発でよい)
+7. **merge の冪等性**: sendMessage(followUp) がメイン走行中に積まれた場合の配送タイミング確認(アイドル後、と本体docsに明記あり)
+8. **コスト**: fork = 親全文の prefix を子の各ターンで再送。プロバイダーのキャッシュで緩和されることをログ(cacheRead)で確認。巨大セッションからの fork には警告表示を検討
+9. **--tools と拡張ツールの関係**: 許可リストに存在しないツール名を指定した場合の挙動
+
+## 7. 他拡張との棲み分け(依存ではなく共存)
+
+| 拡張 | 関係 | 方針 |
 |---|---|---|
-| fork(文脈共有) | agent frontmatter の **`defaultContext: fork`**。launch側の `context: "fork" / "fresh"` も指定可 | agents.md「defaultContext: fork — Use forked session context when a launch omits context」 |
-| rally(多ターン継続) | **retained children + `resume`**。完了した子は直近10件までrun IDで保持され、`resume: runId` で同じ子に追いタスクを投げて会話を継続できる | extension-api.md「Retained children」 |
-| 実行中の子への指示 | fleet インスペクタの **steer(`s`キー)** | observability.md / configuration.md |
-| 統一枠組みでの可視化 | async子は自動でFleetView・`/subagents-fleet`・Herdrペインメタデータに載る | observability.md |
-| 拡張からのプログラム起動 | **Structured delegation API**(`pi-subagents/delegation` の REQUEST/RESPONSE イベント)。`agent`/`task`/`context`/`thinking`/構造化出力まで指定可 | extension-api.md「Structured delegation API」 |
-| 非破壊性 | agent frontmatter の `tools:` 許可リスト | agents.md |
-| スキル継承 | `inheritSkills: true`(ビルトインは false なので明示必須) | agents.md |
-| merge(メイン文脈への挿入) | **存在しない唯一の部品**。Pi本体の `pi.sendMessage({content, deliverAs: "followUp"})` で自作する | Pi本体 docs/extensions.md「pi.sendMessage」 |
+| pi-subagents | 同種の子実行系を持つが**別システム**。コマンド名・ツール名は衝突しない(subagent / *-fleet 系 vs tangent-*) | 併存可。任意連携(FleetView への表示登録)は**将来のオプション**とし、v1 では行わない |
+| zentui / エディタ系 | 入力欄の枠色・装飾を所有 | tangentモードの表示は枠色を使わず、独自ウィジェット+ステータスで行う |
+| tool-display | ツール行の描画を所有 | tangent の表示は appendEntry(独自エントリ型)なので干渉しない |
+| atelier / フッター系 | フッター/サイドバー | 使用しない。将来、サイドバーパネル(公開プロトコル)への任意表示をオプションで検討 |
+| herdr | ペイン状態 | 依存しない。子プロセスは親 Pi の中で完結する |
 
-## 3. アーキテクチャ
+## 8. 参考(確認済みの一次情報)
 
-```
-[メインPi]
-  /tangent <task>      ← 薄い自作拡張(pi-tangent)
-     │ delegation API(または subagent tool)で起動
-     ▼
-[tangent子セッション]  ← agents/tangent.md 定義: defaultContext: fork
-  = メイン会話の全文脈を持つ独立Piセッション(async)
-  FleetView に「◉ tangent」として表示 / インスペクタで閲覧・steer
-     │
-  /rally <text>       ← resume: runId で同じ子に追いターン(rally何回でも)
-     │
-  /merge [指示]        ← 最終ターン: 「handoffを構成せよ」を resume で送る
-     ▼
-  handoff 出力(output: handoff.md / 構造化出力)
-     │
-[メインPi側の pi-tangent 拡張]
-  handoff を読み、pi.sendMessage({ content, deliverAs: "followUp" }) で
-  メインの作業の切れ目に挿入(customType: "branch-merge"、表示付き)
-```
+- Pi RPC モード: `prompt`(streamingBehavior: steer/followUp 指定可)、`steer`、`follow_up`、`abort`、`new_session`、`get_state`、`get_messages` — Pi本体 docs/rpc.md で確認済み
+- `pi --fork <path|id>` は Pi 本体の公開 CLI フラグ(--help で確認済み)
+- `pi.sendMessage` の followUp 配送は「エージェントがアイドルになった後」に処理(docs/extensions.md)
+- `pi.on("input")` は Ponytail が使用実績あり(ブロック可否のみ未確認)
+- appendEntry + registerEntryRenderer で「LLM文脈に入らないTUI専用の恒久表示」が可能(作者の別拡張で実証済み)
 
-### Phase 1(コードゼロ、即日運用可能)
+## 付録: pi-subagents を使った先行プロトタイプ(任意)
 
-`agents/tangent.md` を置くだけで、拡張なしでも運用できる:
-
-```markdown
----
-name: tangent
-description: Context-forked side conversation. Investigates, discusses, and
-  proposes without touching the main context; produces a handoff on request.
-defaultContext: fork
-inheritSkills: true
-inheritProjectContext: true
-tools: read, grep, find, ls, web_search, fetch_content, get_search_content, intercom
-thinking: medium
-output: handoff.md
----
-You are a side-conversation branch forked from the main session. You share its
-full history. Work on the requested tangent: investigate, answer questions,
-develop proposals. Multi-turn: expect follow-up instructions via resume/steer.
-When asked to merge, compose a concise handoff for the main conversation:
-include only what the main thread needs (decisions, findings, proposals,
-concrete diffs/snippets), following the user's merge instructions if given.
-```
-
-運用(すべて既存機能):
-- 起動: メインに「`Run branch async (context fork): <調査依頼>`」
-- rally: 実行中は fleet インスペクタで `s`(steer)。完了後は「`Resume the branch run <id>: <追い質問>`」(=subagentツールの `resume`)
-- 閲覧: FleetView展開(`↓`)→ Enter、または `/subagents-fleet`(メイン文脈に入れずトランスクリプトを読める)
-- merge: 「`Resume the branch: compose the handoff (…の部分だけ)`」→ メインで `subagent_wait` → 結果がツール結果としてメイン文脈に入る = マージ完了
-
-Phase 1 の制約: rally/mergeの指示文がメイン会話に1行ずつ載る(subagentツール呼び出しのため)。
-
-### Phase 2(薄い拡張 `pi-tangent` — メイン文脈を一切経由しないUX)
-
-dotagents の `extensions/` に追加。`/usage-report` 拡張と同じ作法(registerCommand + appendEntry)。
-
-- `/tangent <task>` — delegation API で `agent: "branch", context: "fork"` を投入。メインLLM不関与
-- `/rally [id] <text>` — 保持中の子へ `resume` で追いターン投入。子が1つなら id 省略
-- `/merge [id] [指示]` — merge構成ターンを投入 → 完了後 handoff を取得 → `pi.sendMessage({customType: "branch-merge", content, display: true}, { deliverAs: "followUp" })` でメイン文脈に挿入
-- `/tangents` — 保持中の branch 一覧を TUI 専用エントリで表示(appendEntry)
-
-## 4. 要検証項目(実装時に最初に潰すこと)
-
-1. **子への専用ツール注入**: agent 定義の `extensions:` / `subagentOnlyExtensions` で子だけに `merge_to_main` ツールを持つ拡張をロードできるか、および子のツール呼び出しを親側拡張が受け取る経路(handoffファイル + watcher、または intercom)の選定
-2. **切替ショートカットとウィジェット**: `pi.registerShortcut` のキー選定(既存キーとの衝突確認: Ctrl+T=thinking、Ctrl+P=モデル巡回等)。インジケータは `ctx.ui.setWidget` で足りるか。zentui のエディタ描画と干渉しないこと
-3. **input イベントのブロック(消費)可否**: tangentモードの成立条件。`pi.on("input")` がハンドラから入力の消費/抑止を返せるか(tool_call の `{block:true}` 相当)。Pi 本体 docs/extensions.md の input イベント仕様と Ponytail の実装(`~/.pi/agent/npm/node_modules/@dietrichgebert/ponytail/pi-extension/index.js`)を読む。不可なら CustomEditor 方式へ
-4. **delegation API の対応範囲**: docsは「foreground leaf agent」と記載。**async起動とresumeがdelegation APIで可能か**を確認。不可なら代替: (a) `/rally`等の拡張コマンドから `pi.sendMessage` でメインに極小の指示を送る(Phase1と同等のメイン負荷)、(b) workflowScript(`runs.run` は resume 対応が明記済み)をdelegation経由で使う
-5. **`/run` スラッシュコマンドの構文**: `/run branch[...] "task"` が resume/context を受けるか(受けるならPhase 2の大半が不要になる可能性)
-6. **fork スナップショットのタイミング**: fork は起動時点の親文脈を写す。rally 中に親が進んでも子には反映されない(仕様として明記する)
-7. **resume 保持数の上限**: retained children は直近10件。長寿命の branch 運用での挙動
-8. **コスト**: fork = 親の全 prefix を子の各ターンで再送。Codex はキャッシュが効くが(ログの cacheRead で確認可能)、巨大セッションからの fork は1ターンあたりのトークンが大きい。`/tangent` 時に FleetView のトークン表示で監視
-9. **handoff の受け渡し形式**: `output: handoff.md` のファイル経由か、構造化出力(delegation の `result.kind: "structured"`)か。Phase 2 では構造化出力が堅い
-
-## 5. 非破壊性について
-
-上記 `tools:` には bash / edit / write を含めない(output ファイルは output 機構が扱う)。
-コードを書ける branch が欲しくなったら `tangent-rw.md` を別名で定義(tools に edit/write/bash を追加)し、
-使い分ける。既定は非破壊版。
-
-## 6. 実装ステップ
-
-1. Phase 1: `agents/tangent.md` を dotagents に追加、bootstrap で `~/.pi/agent/agents/` へ配置(配置先ディレクトリは agents.md の「Custom agents」節で確認すること)。1日使って運用感を評価
-2. 要検証項目 1〜2 を潰す(pi-subagents のソース読解含む)
-3. Phase 2: `extensions/pi-tangent.ts` を実装。/branch → /rally → /merge の順で1コマンドずつ
-4. Claude敵対レビュー(claude-adversarial-review / AskClaude)を通す
-5. dotagents に載せて全マシン配布
-
-## 7. 参考: 本設計の前提となった検証済み事実
-
-- pi-subagents の scout は `tools: read, grep, find, ls, bash, write, intercom` で**厳密には非破壊ではない**(だからこそ branch.md を別定義する)
-- ビルトインは `inheritSkills: false`(スキルを使わせたいので branch は true)
-- 親の usage 集計・FleetView・Herdr メタデータは async 子に対して自動で機能することを確認済み
-- `pi.sendMessage` の followUp 配送は「エージェントがアイドルになった後」に処理される(Pi本体 extensions.md)ため、走行中のメインを妨げない
+作者環境には pi-subagents が入っているため、製品実装前の**体験検証**としては同フレームワークの
+`defaultContext: fork` + retained children `resume` + steer で近い体験を数分で試せる
+(agents/*.md 1枚。詳細は pi-subagents docs/agents.md, extension-api.md)。
+ただしこれはプロトタイプ専用であり、**製品の pi-tangent は上記の自己完結アーキテクチャで実装する**。
