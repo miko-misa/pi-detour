@@ -104,7 +104,9 @@ dotagents の `extensions/` に追加。`/usage-report` 拡張と同じ作法(re
 
 ## 4. 要検証項目(実装時に最初に潰すこと)
 
-0. **input イベントのブロック(消費)可否**: tangentモードの成立条件。`pi.on("input")` がハンドラから入力の消費/抑止を返せるか(tool_call の `{block:true}` 相当)。Pi 本体 docs/extensions.md の input イベント仕様と Ponytail の実装(`~/.pi/agent/npm/node_modules/@dietrichgebert/ponytail/pi-extension/index.js`)を読む。不可なら CustomEditor 方式へ
+-1. **子への専用ツール注入**: agent 定義の `extensions:` / `subagentOnlyExtensions` で子だけに `merge_to_main` ツールを持つ拡張をロードできるか、および子のツール呼び出しを親側拡張が受け取る経路(handoffファイル + watcher、または intercom)の選定
+0. **切替ショートカットとウィジェット**: `pi.registerShortcut` のキー選定(既存キーとの衝突確認: Ctrl+T=thinking、Ctrl+P=モデル巡回等)。インジケータは `ctx.ui.setWidget` で足りるか。zentui のエディタ描画と干渉しないこと
+0.5. **input イベントのブロック(消費)可否**: tangentモードの成立条件。`pi.on("input")` がハンドラから入力の消費/抑止を返せるか(tool_call の `{block:true}` 相当)。Pi 本体 docs/extensions.md の input イベント仕様と Ponytail の実装(`~/.pi/agent/npm/node_modules/@dietrichgebert/ponytail/pi-extension/index.js`)を読む。不可なら CustomEditor 方式へ
 1. **delegation API の対応範囲**: docsは「foreground leaf agent」と記載。**async起動とresumeがdelegation APIで可能か**を確認。不可なら代替: (a) `/rally`等の拡張コマンドから `pi.sendMessage` でメインに極小の指示を送る(Phase1と同等のメイン負荷)、(b) workflowScript(`runs.run` は resume 対応が明記済み)をdelegation経由で使う
 2. **`/run` スラッシュコマンドの構文**: `/run branch[...] "task"` が resume/context を受けるか(受けるならPhase 2の大半が不要になる可能性)
 3. **fork スナップショットのタイミング**: fork は起動時点の親文脈を写す。rally 中に親が進んでも子には反映されない(仕様として明記する)
