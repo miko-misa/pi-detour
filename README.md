@@ -17,7 +17,9 @@ and the one genuinely new piece (merge via `pi.sendMessage` followUp).
 
 ## Planned commands
 
-- `/tangent <task>` — spawn a context-forked tangent subagent (async)
-- `/rally [id] <text>` — continue the conversation with a tangent
-- `/merge [id] [instructions]` — compose and inject the handoff into main
+- `/tangent <task>` — spawn a context-forked tangent subagent and enter
+  tangent mode: plain prompts now route to the tangent (bash-mode-style
+  visual indicator), leaving the main context untouched
+- `/main` — exit tangent mode, back to the main conversation
+- `/merge [instructions]` — compose and inject the handoff into main
 - `/tangents` — list retained tangents
