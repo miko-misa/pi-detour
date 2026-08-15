@@ -1,4 +1,4 @@
-# pi-branch
+# pi-tangent
 
 Context-forked side conversations for the [Pi](https://pi.dev) coding agent —
 "more than steering, less than a worktree".
@@ -17,7 +17,7 @@ and the one genuinely new piece (merge via `pi.sendMessage` followUp).
 
 ## Planned commands
 
-- `/branch <task>` — spawn a context-forked branch subagent (async)
-- `/rally [id] <text>` — continue the conversation with a branch
+- `/tangent <task>` — spawn a context-forked tangent subagent (async)
+- `/rally [id] <text>` — continue the conversation with a tangent
 - `/merge [id] [instructions]` — compose and inject the handoff into main
-- `/branches` — list retained branches
+- `/tangents` — list retained tangents

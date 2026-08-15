@@ -1,11 +1,11 @@
-# branch agent 設計資料 — 「worktree未満・steering以上」の会話ブランチ&マージ
+# tangent agent 設計資料 — 「worktree未満・steering以上」の会話ブランチ&マージ
 
 作成: 2026-08-15。実装はPi環境(Codex実装+Claude敵対レビュー)で行う想定の設計書。
 
 ## 0. 用語と非目標(重要)
 
-- 本設計の「fork」は **pi-subagents の起動オプション `context: fork`**(起動時に親の会話履歴を子のコンテキストへコピーする)を指す。**Pi本体のセッションfork(ダブルEsc/`--fork`、別タブに切り替わる機能)は一切使わない**。branch は最初から最後まで「普通のasyncサブエージェント」として存在し、画面は切り替わらない
-- **既存機能は改変しない**。Pi本体のfork、pi-subagentsのビルトインagent(scout/worker等)、subagentツールはそのまま残す。branchは新規のagent定義1枚+新規の拡張1本の**純粋な追加**であり、依存するのは文書化された公開インターフェース(agent定義、delegation API、pi.sendMessage)のみ
+- 本設計の「fork」は **pi-subagents の起動オプション `context: fork`**(起動時に親の会話履歴を子のコンテキストへコピーする)を指す。**Pi本体のセッションfork(ダブルEsc/`--fork`、別タブに切り替わる機能)は一切使わない**。tangent は最初から最後まで「普通のasyncサブエージェント」として存在し、画面は切り替わらない
+- **既存機能は改変しない**。Pi本体のfork、pi-subagentsのビルトインagent(scout/worker等)、subagentツールはそのまま残す。tangentは新規のagent定義1枚+新規の拡張1本の**純粋な追加**であり、依存するのは文書化された公開インターフェース(agent定義、delegation API、pi.sendMessage)のみ
 
 ## 1. 目的と要件
 
@@ -43,12 +43,12 @@
 
 ```
 [メインPi]
-  /branch <task>      ← 薄い自作拡張(pi-branch)
+  /tangent <task>      ← 薄い自作拡張(pi-tangent)
      │ delegation API(または subagent tool)で起動
      ▼
-[branch子セッション]  ← agents/branch.md 定義: defaultContext: fork
+[tangent子セッション]  ← agents/tangent.md 定義: defaultContext: fork
   = メイン会話の全文脈を持つ独立Piセッション(async)
-  FleetView に「◉ branch」として表示 / インスペクタで閲覧・steer
+  FleetView に「◉ tangent」として表示 / インスペクタで閲覧・steer
      │
   /rally <text>       ← resume: runId で同じ子に追いターン(rally何回でも)
      │
@@ -56,18 +56,18 @@
      ▼
   handoff 出力(output: handoff.md / 構造化出力)
      │
-[メインPi側の pi-branch 拡張]
+[メインPi側の pi-tangent 拡張]
   handoff を読み、pi.sendMessage({ content, deliverAs: "followUp" }) で
   メインの作業の切れ目に挿入(customType: "branch-merge"、表示付き)
 ```
 
 ### Phase 1(コードゼロ、即日運用可能)
 
-`agents/branch.md` を置くだけで、拡張なしでも運用できる:
+`agents/tangent.md` を置くだけで、拡張なしでも運用できる:
 
 ```markdown
 ---
-name: branch
+name: tangent
 description: Context-forked side conversation. Investigates, discusses, and
   proposes without touching the main context; produces a handoff on request.
 defaultContext: fork
@@ -93,14 +93,14 @@ concrete diffs/snippets), following the user's merge instructions if given.
 
 Phase 1 の制約: rally/mergeの指示文がメイン会話に1行ずつ載る(subagentツール呼び出しのため)。
 
-### Phase 2(薄い拡張 `pi-branch` — メイン文脈を一切経由しないUX)
+### Phase 2(薄い拡張 `pi-tangent` — メイン文脈を一切経由しないUX)
 
 dotagents の `extensions/` に追加。`/usage-report` 拡張と同じ作法(registerCommand + appendEntry)。
 
-- `/branch <task>` — delegation API で `agent: "branch", context: "fork"` を投入。メインLLM不関与
+- `/tangent <task>` — delegation API で `agent: "branch", context: "fork"` を投入。メインLLM不関与
 - `/rally [id] <text>` — 保持中の子へ `resume` で追いターン投入。子が1つなら id 省略
 - `/merge [id] [指示]` — merge構成ターンを投入 → 完了後 handoff を取得 → `pi.sendMessage({customType: "branch-merge", content, display: true}, { deliverAs: "followUp" })` でメイン文脈に挿入
-- `/branches` — 保持中の branch 一覧を TUI 専用エントリで表示(appendEntry)
+- `/tangents` — 保持中の branch 一覧を TUI 専用エントリで表示(appendEntry)
 
 ## 4. 要検証項目(実装時に最初に潰すこと)
 
@@ -108,20 +108,20 @@ dotagents の `extensions/` に追加。`/usage-report` 拡張と同じ作法(re
 2. **`/run` スラッシュコマンドの構文**: `/run branch[...] "task"` が resume/context を受けるか(受けるならPhase 2の大半が不要になる可能性)
 3. **fork スナップショットのタイミング**: fork は起動時点の親文脈を写す。rally 中に親が進んでも子には反映されない(仕様として明記する)
 4. **resume 保持数の上限**: retained children は直近10件。長寿命の branch 運用での挙動
-5. **コスト**: fork = 親の全 prefix を子の各ターンで再送。Codex はキャッシュが効くが(ログの cacheRead で確認可能)、巨大セッションからの fork は1ターンあたりのトークンが大きい。`/branch` 時に FleetView のトークン表示で監視
+5. **コスト**: fork = 親の全 prefix を子の各ターンで再送。Codex はキャッシュが効くが(ログの cacheRead で確認可能)、巨大セッションからの fork は1ターンあたりのトークンが大きい。`/tangent` 時に FleetView のトークン表示で監視
 6. **handoff の受け渡し形式**: `output: handoff.md` のファイル経由か、構造化出力(delegation の `result.kind: "structured"`)か。Phase 2 では構造化出力が堅い
 
 ## 5. 非破壊性について
 
 上記 `tools:` には bash / edit / write を含めない(output ファイルは output 機構が扱う)。
-コードを書ける branch が欲しくなったら `branch-rw.md` を別名で定義(tools に edit/write/bash を追加)し、
+コードを書ける branch が欲しくなったら `tangent-rw.md` を別名で定義(tools に edit/write/bash を追加)し、
 使い分ける。既定は非破壊版。
 
 ## 6. 実装ステップ
 
-1. Phase 1: `agents/branch.md` を dotagents に追加、bootstrap で `~/.pi/agent/agents/` へ配置(配置先ディレクトリは agents.md の「Custom agents」節で確認すること)。1日使って運用感を評価
+1. Phase 1: `agents/tangent.md` を dotagents に追加、bootstrap で `~/.pi/agent/agents/` へ配置(配置先ディレクトリは agents.md の「Custom agents」節で確認すること)。1日使って運用感を評価
 2. 要検証項目 1〜2 を潰す(pi-subagents のソース読解含む)
-3. Phase 2: `extensions/pi-branch.ts` を実装。/branch → /rally → /merge の順で1コマンドずつ
+3. Phase 2: `extensions/pi-tangent.ts` を実装。/branch → /rally → /merge の順で1コマンドずつ
 4. Claude敵対レビュー(claude-adversarial-review / AskClaude)を通す
 5. dotagents に載せて全マシン配布
 
