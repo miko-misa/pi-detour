@@ -285,8 +285,10 @@ export default function detourExtension(pi: ExtensionAPI): void {
     command("close", "Close this detour without merging", (_args, ctx) =>
       close(ctx),
     );
-    command("main", "Return to main without closing this detour", (_args, ctx) =>
-      returnMain(ctx),
+    command(
+      "main",
+      "Return to main without closing this detour",
+      (_args, ctx) => returnMain(ctx),
     );
   }
 
@@ -316,7 +318,10 @@ export default function detourExtension(pi: ExtensionAPI): void {
   pi.on("session_before_switch", (event, ctx) => {
     const record = host.bind(pi, ctx);
     if (host.blocksLiveSessionSwitch(record, event.targetSessionFile)) {
-      ctx.ui.notify("Cannot resume the other live pi-detour session", "warning");
+      ctx.ui.notify(
+        "Cannot resume the other live pi-detour session",
+        "warning",
+      );
       return { cancel: true };
     }
   });

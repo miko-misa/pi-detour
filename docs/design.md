@@ -47,7 +47,7 @@ mainからdetourへ移る時だけ、`ctx.ui.custom()` を空componentで開い�
 3. safe leafまでを `createBranchedSession()` で新sessionへ抽出する。assistant messageがまだないbranchではdeferred persistenceをそのまま使う。
 4. mainのmodel、thinking level、selected toolsを継承する。
 5. `SettingsManager` と `createAgentSessionServices()` で同じcwdのglobal/project/package resourcesを再読込する。mainと同じbuilt-in provider extensions（llama.cpp等）も注入するため、`getPackageDir()/dist/extensions/index.js` の `builtInExtensions` をcached dynamic importする。
-6. `parseArgs(process.argv.slice(2))` からCLI extension/skill/prompt/theme source、no-* flags、system prompt、extension flagsをchild loaderへ渡す。npm/git/URL sourceも保持する。
+6. `parseArgs(process.argv.slice(2))` からCLI extension/skill/prompt/theme source、`--no-extensions` 等のflags、system prompt、extension flagsをchild loaderへ渡す。npm/git/URL sourceも保持する。
 7. `import.meta.url` から得たpi-detour自身のabsolute extension pathを常に追加する。
 8. CLI `--models`、`--api-key` をchild model runtimeへ、`--tui-mode`、`--use-theme` をchild `InteractiveMode` へ適用する。
 9. child runtimeとnative `InteractiveMode` を作り、taskをinitial messageとして開始する。

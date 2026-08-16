@@ -11,14 +11,33 @@
   },
   "homepage": "https://github.com/miko-misa/pi-detour#readme",
   "bugs": "https://github.com/miko-misa/pi-detour/issues",
-  "keywords": ["pi-package", "pi", "detour", "sessions"],
-  "files": ["src", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "docs"],
-  "engines": { "node": ">=22.19.0" },
-  "pi": { "extensions": ["./src/index.ts"] },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "detour",
+    "sessions"
+  ],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run format:check && npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
@@ -26,6 +45,7 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@types/node": "24.12.4",
+    "prettier": "3.6.2",
     "typescript": "5.9.3",
     "vitest": "4.1.9"
   }

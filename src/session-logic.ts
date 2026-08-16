@@ -56,7 +56,8 @@ export function parseDetourCommand(
   hasActiveDetour: boolean,
 ): DetourCommandDecision {
   const text = input.trim();
-  if (!text) return hasActiveDetour ? { action: "switch" } : { action: "usage" };
+  if (!text)
+    return hasActiveDetour ? { action: "switch" } : { action: "usage" };
 
   const separator = text.search(/\s/);
   const verb = (separator < 0 ? text : text.slice(0, separator)).toLowerCase();
@@ -94,7 +95,8 @@ export function parseDetourCommand(
   }
   return {
     action: "error",
-    message: "Usage: /detour [switch|send <message>|merge [instructions]|close|status]",
+    message:
+      "Usage: /detour [switch|send <message>|merge [instructions]|close|status]",
   };
 }
 

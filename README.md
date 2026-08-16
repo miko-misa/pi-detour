@@ -79,8 +79,8 @@ Do not use `--no-session`: opening a detour needs a persisted main session leaf.
 
 ```bash
 npm install
-npm run typecheck
-npm test
+npm run format
+npm run check
 npm pack --dry-run
 ```
 
