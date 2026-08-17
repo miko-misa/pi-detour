@@ -12,7 +12,7 @@ import {
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const MAX_TIMEOUT_MS = 2_147_483_647;
-const EXIT_STDIO_GRACE_MS = 100;
+const EXIT_STDIO_GRACE_MS = 500;
 const BASH_FENCE_EXTENSION_PATH = "<inline:pi-detour-bash-fence>";
 
 export interface PreparedBashFence {
