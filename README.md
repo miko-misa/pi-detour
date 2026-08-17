@@ -91,7 +91,8 @@ conflict and is overridden normally.
 The custom operations spawn the native fence directly, with Pi's configured
 command prefix and original command both inside the fence. Pi's selected shell
 and arguments, `PI_*` environment, output accumulation, and renderer are
-retained; timeout, abort, and post-exit stdio handling match Pi's Bash behavior.
+retained; timeout and abort match Pi's Bash behavior, while post-exit stdio uses a
+500 ms idle grace to retain delayed descendant output.
 Explicit user `!` / `!!` commands remain on Pi's normal unrestricted path. Main
 registers no override and is completely unrestricted.
 
