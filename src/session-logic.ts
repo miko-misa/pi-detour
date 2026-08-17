@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Args } from "@earendil-works/pi-coding-agent";
 
-const RESTRICTED_DETOUR_TOOLS = new Set(["bash", "edit", "write"]);
+const RESTRICTED_DETOUR_TOOLS = new Set(["edit", "write"]);
 const DETOUR_MANAGEMENT_VERBS = new Set([
   "switch",
   "send",
@@ -15,15 +15,6 @@ const DETOUR_MANAGEMENT_VERBS = new Set([
 
 export function isRestrictedDetourTool(name: string): boolean {
   return RESTRICTED_DETOUR_TOOLS.has(name);
-}
-
-export function blockedDetourBashResult() {
-  return {
-    output: "pi-detour blocks ! and !! commands in detour sessions",
-    exitCode: 1,
-    cancelled: false,
-    truncated: false,
-  };
 }
 
 export function toggleTarget(

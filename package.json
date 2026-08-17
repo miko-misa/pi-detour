@@ -1,6 +1,6 @@
 {
   "name": "pi-detour",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Take a live detour in Pi, then merge it back",
   "type": "module",
   "license": "MIT",

@@ -10,7 +10,7 @@ message/tool renderers, commands, themes, and loaded extensions.
 
 ## Status
 
-Version 0.2.0 targets Pi 0.84.2. The native terminal handoff is derived from
+Version 0.3.0 targets Pi 0.84.2. The native terminal handoff is derived from
 [`pi-parallel-sessions`](https://github.com/liushihao456/pi-sessions); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
@@ -23,7 +23,15 @@ See [docs/design.md](docs/design.md).
 
 ## Install
 
-Pi 0.84.2 and Node.js 22.19 or newer are required.
+Pi 0.84.2 and Node.js 22.19 or newer are required. Detours also require macOS
+with the system `/usr/bin/sandbox-exec`, or Linux with an executable, usable
+`bwrap` (bubblewrap) on `PATH`. Linux must permit bubblewrap's unprivileged user
+namespace and mount setup; Ubuntu's AppArmor user-namespace restrictions may
+require an administrator-approved bubblewrap configuration.
+
+`/usr/bin/sandbox-exec` is currently available on macOS, but its profile
+language is a deprecated, undocumented implementation detail with no compatibility
+guarantee. Detour creation fails closed if the backend is unavailable or unusable.
 
 ```bash
 pi install git:github.com/miko-misa/pi-detour
@@ -57,12 +65,45 @@ working. A dedicated TUI indicator below the editor always shows `[MAIN]` or
 
 ## Mutation policy
 
-The detour's built-in `bash`, `edit`, and `write` tool calls are blocked, and
-native `!` / `!!` shell input returns a synthetic failure. Main is unrestricted.
-Both sessions share the same repository and filesystem.
+The detour's built-in `edit` and `write` tools are blocked. Its built-in `bash`
+remains available for investigation, but each command is run with a platform
+fence that denies writes through the canonical workspace path for Bash and its
+descendants. Reads remain available, and writes outside the workspace (including
+temporary directories) remain available. An inside symlink to an outside target
+is writable; an outside symlink into the workspace is not. Network access,
+localhost binding, and local sockets are not intentionally restricted.
 
-This is cooperative protection, not a sandbox: arbitrary extension commands or
-custom tools may still have side effects, as may external editors and processes.
+On macOS the fence uses the fixed `/usr/bin/sandbox-exec` and also protects the
+workspace's ancestor directory entries from rename. On Linux it resolves
+bubblewrap once to a canonical launcher whose executable and ancestor directories
+are not user-writable, then applies the root bind, read-only workspace bind, and
+finally a fresh PID namespace and `/proc`; networking is not unshared.
+
+The first detour-only inline extension replaces the base built-in `bash` tool
+with Pi's public `createBashTool` using custom process operations. Pi loads file
+extensions before inline factories and uses the first extension registration for
+each tool name, so detour creation fails closed if a user, project, or package
+file extension registers `bash`. A final hidden inline guard also verifies the
+current `bash` owner before every agent call and blocks if a dynamically registered
+override displaced the fence. The base built-in Bash tool is not an extension
+conflict and is overridden normally.
+
+The custom operations spawn the native fence directly, with Pi's configured
+command prefix and original command both inside the fence. Pi's selected shell
+and arguments, `PI_*` environment, output accumulation, and renderer are
+retained; timeout, abort, and post-exit stdio handling match Pi's Bash behavior.
+Explicit user `!` / `!!` commands remain on Pi's normal unrestricted path. Main
+registers no override and is completely unrestricted.
+
+Fence availability is preflighted before the session fork is created. Unsupported
+platforms, a missing backend, or an unusable backend fail closed with an
+actionable error.
+
+This is a pathname/mount accident-prevention fence, not a complete sandbox or an
+inode/IPC security boundary. Pre-existing hard links, alternate mounts or aliases,
+IPC to an unrestricted process, custom tools/extensions running in Pi's process,
+and a concurrently running main session can still modify workspace data. External
+editors and processes are also outside this policy.
 
 ## Try locally
 

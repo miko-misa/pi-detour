@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { MAIN_SESSION_ID, NativeSessionHost } from "../src/live-sessions.ts";
 import {
   assistantTextForUserTurn,
-  blockedDetourBashResult,
   canDeliverMerge,
   childCliResources,
   forkLeafForActivity,
@@ -19,17 +19,19 @@ import {
 } from "../src/session-logic.ts";
 
 describe("detour tool policy", () => {
-  it("blocks built-in mutation-capable tools only", () => {
-    expect(["bash", "edit", "write"].every(isRestrictedDetourTool)).toBe(true);
+  it("leaves the main record without an inline Bash fence", () => {
+    const host = new NativeSessionHost();
+    expect(host.get(MAIN_SESSION_ID)?.kind).toBe("main");
+    expect(host.get(MAIN_SESSION_ID)?.bashFence).toBeUndefined();
+  });
+
+  it("blocks only the built-in direct-write tools", () => {
+    expect(["edit", "write"].every(isRestrictedDetourTool)).toBe(true);
     expect(
-      ["read", "grep", "find", "ls", "custom_readonly"].some(
+      ["bash", "read", "grep", "find", "ls", "custom_readonly"].some(
         isRestrictedDetourTool,
       ),
     ).toBe(false);
-    expect(blockedDetourBashResult()).toMatchObject({
-      exitCode: 1,
-      cancelled: false,
-    });
   });
 });
 

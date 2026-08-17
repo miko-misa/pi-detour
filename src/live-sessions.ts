@@ -21,6 +21,14 @@ import {
   type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import {
+  assertBashFenceRegistrationOrder,
+  assertFenceWorkspace,
+  bashFenceInlineExtension,
+  bashFenceOwnershipGuardInlineExtension,
+  prepareBashFence,
+  type PreparedBashFence,
+} from "./bash-fence.ts";
+import {
   childCliResources,
   sameSessionFile,
   SessionOwnership,
@@ -81,6 +89,7 @@ export interface LiveSessionRecord {
   merging?: boolean;
   error?: string;
   runPromise?: Promise<void>;
+  bashFence?: PreparedBashFence;
 }
 
 function safeMessage(error: unknown): string {
@@ -332,7 +341,11 @@ export class NativeSessionHost {
   private createRuntimeFor(ownerId: string): CreateAgentSessionRuntimeFactory {
     return async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
       this.ownership.claim(sessionManager, ownerId);
-      const inheritance = this.records.get(ownerId)?.inheritance ?? {};
+      const record = this.records.get(ownerId);
+      const fence = record?.bashFence;
+      if (!fence) throw new Error("Detour Bash fence is not prepared");
+      assertFenceWorkspace(fence, cwd);
+      const inheritance = record.inheritance ?? {};
       let projectTrusted = true;
       if (hasTrustRequiringProjectResources(cwd)) {
         projectTrusted =
@@ -344,7 +357,14 @@ export class NativeSessionHost {
       const settingsManager = SettingsManager.create(cwd, agentDir, {
         projectTrusted,
       });
-      const extensionFactories = await loadBuiltInExtensions();
+      const extensionFactories = [
+        bashFenceInlineExtension(fence, {
+          commandPrefix: settingsManager.getShellCommandPrefix(),
+          shellPath: settingsManager.getShellPath(),
+        }),
+        ...(await loadBuiltInExtensions()),
+        bashFenceOwnershipGuardInlineExtension(),
+      ];
       const services = await createAgentSessionServices({
         cwd,
         agentDir,
@@ -355,6 +375,9 @@ export class NativeSessionHost {
           extensionFactories,
         },
       });
+      assertBashFenceRegistrationOrder(
+        services.resourceLoader.getExtensions().extensions,
+      );
 
       const options: Record<string, unknown> = {
         ...(inheritance.sessionOptions ?? {}),
@@ -438,6 +461,7 @@ export class NativeSessionHost {
     if (!sourceFile || !existsSync(sourceFile) || !forkLeaf)
       throw new Error("Current session is not persisted yet");
 
+    const bashFence = prepareBashFence(ctx.cwd);
     const manager = SessionManager.open(sourceFile);
     const forkFile = manager.createBranchedSession(forkLeaf);
     if (!forkFile) throw new Error("Could not create detour session fork");
@@ -453,6 +477,7 @@ export class NativeSessionHost {
       sessionFile: forkFile,
       createdAt: Date.now(),
       inheritance: collectInheritance(ctx),
+      bashFence,
     };
     this.records.set(id, record);
     this.ownership.claim(manager, id);

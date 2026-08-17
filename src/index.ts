@@ -11,7 +11,6 @@ import {
 } from "./live-sessions.ts";
 import {
   assistantTextForUserTurn,
-  blockedDetourBashResult,
   canDeliverMerge,
   forkLeafForActivity,
   isRestrictedDetourTool,
@@ -333,13 +332,6 @@ export default function detourExtension(pi: ExtensionAPI): void {
         block: true,
         reason: `pi-detour blocks ${event.toolName} in detour sessions; merge recommendations back to main`,
       };
-    }
-  });
-
-  pi.on("user_bash", (_event, ctx) => {
-    const record = host.bind(pi, ctx);
-    if (record.kind === "detour") {
-      return { result: blockedDetourBashResult() };
     }
   });
 

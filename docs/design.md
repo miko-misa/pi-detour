@@ -10,7 +10,7 @@
 - 選択中の `InteractiveMode` だけがterminalを所有する。非表示sessionはTUIを停止するがagent runtimeは継続できる。
 - detourはmainのsafe leafから `SessionManager.createBranchedSession()` でforkする。
 - mainとdetourは同じcwd/repositoryを参照する。worktreeやrepository copyは作らない。
-- detourのbuilt-in `bash`、`edit`、`write` tool callをblockする。
+- detourのbuilt-in `edit`、`write` tool callをblockする。built-in `bash`はcanonical workspaceへのwriteだけをplatform fenceで拒否し、調査用途には使える。
 - mergeは明示的なcommandだけが実行し、最終handoff 1件だけをmainへ配送する。
 - product、package、GitHub repositoryの正式名は `pi-detour`。local checkout directory名は動作に影響しない。
 
@@ -91,9 +91,19 @@ merge中はsendと重複mergeを拒否する。main shutdownが先に成立し�
 
 ## 7. Mutation policy
 
-childの `tool_call` hookで `bash`、`edit`、`write` をblockする。さらに `user_bash` をsynthetic failureで処理し、native editorの `!` / `!!` も実行しない。
+childの通常extension hookではbuilt-in `edit`と`write`だけをblockする。`bash`はblockしない。`createRuntimeFor()` はdetour専用hidden inline factoryをbuilt-in inline factoriesより前に置き、そのfactoryがpublic `createBashTool()`による`bash` overrideを登録する。Pi 0.84.2はtool名ごとに最初のextension登録を採用するため、services生成後にpublic `resourceLoader.getExtensions().extensions` の順序を検査し、最初に`bash`を登録したextensionが `<inline:pi-detour-bash-fence>` でなければfail closedする。さらに全built-in inline factoriesより後ろのdetour専用hidden guardが、agentの各`bash` tool call直前にpublic `pi.getAllTools()`で現在のownerを検査し、同pathでなければblockする。guardはtoolを登録せず、`user_bash`をhookしない。file extensionは全inline factoryより先にloadされるため、user/project/package file extensionによる`bash`登録とは併用できない。base built-in Bashはextension登録ではないため競合せず、通常どおりoverrideされる。
 
-mainは制限しない。これはbuilt-in tool policyでありsandboxではない。副作用metadataがPi tool schemaにないため、arbitrary custom tool、extension command、background extension、external editor/processのwriteは防げない。
+overrideはcustom `BashOperations`を使い、Piが設定済みcommand prefixを加えたcommandをnative fence processへ直接渡す。したがってcommand prefixとoriginal commandはどちらもfence内の設定済みshellで実行され、fence前にouter shellは起動しない。`getShellConfig(shellPath)`でPiのshell/argsを維持し、`createBashTool()`のoutput accumulation、renderer、`PI_*` environmentも維持する。custom operationsはstreaming、timeout validation、abort、process-group killを担当する。launcherの`exit`後はstdout/stderrの終了または100msのstdio idleを待ち、post-exit dataごとにidle graceをresetする。`close`は即時確定し、idle確定時は残存streamをdestroyする。`user_bash` hookは置かず、明示的な `!` / `!!` はPi標準の制限なしpathを使う。mainにはinline overrideを登録しない。
+
+workspaceはfork前に `realpathSync.native()` でcanonicalizeし、実backendをpreflightする。child内の後続`/new`、`/resume`、`/fork`でruntime factoryへ異なるcanonical cwdが渡された場合はprepared fenceを再利用せずfail closedする。同じcanonical cwdのaliasは許可する。unsupported platform、backend不在、user namespace/mount等でbackendが利用不能な場合はsession fork前にfail closedする。prepared fenceはdetour recordへ保存する。
+
+- macOS: fixed `/usr/bin/sandbox-exec`、`(version 1)`、`(allow default)`を使い、canonical workspaceの `file-write*` をdenyする。workspaceと全ancestorのdirectory entryに対する `file-write-unlink` / `file-write-create` もdenyし、ancestor renameによるpath移動を防ぐ。
+- Linux: PATH上のexecutable `bwrap`を一度だけcanonical absolute pathへ解決し、executableまたはancestor directoryがcurrent userにwritableなcandidateは拒否する。mount順は`--bind / / --ro-bind <workspace> <workspace> --unshare-pid --proc /proc`とし、fresh `/proc`をfinal mountにする。network namespaceはunshareしない。
+- native launcher起動時は`LD_*` / `DYLD_*`を除去し、必要な値はfence内shellのcommand冒頭で復元する。設定済みshell自身を含むfence前processへのdynamic-loader injectionを防ぐ一方、fence内command environmentは維持する。
+
+Bashとdescendantはcanonical workspace path配下へ直接writeできない。outside read/write（tempを含む）は許可し、outside symlinkからworkspaceへのwriteは拒否する一方、workspace内symlinkからoutside targetへのwriteは許可する。network、localhost bind、local socketは意図的に制限しない。
+
+これはpathname/mountの事故防止fenceで、完全なsandboxでもinode/IPC security boundaryでもない。pre-existing hard link、alternate mount/alias、unrestricted processへのIPC、同一Pi processのcustom tool/extension、external editor/process、concurrent main sessionによるwriteは防げない。
 
 ## 8. Lifecycle
 
@@ -110,6 +120,7 @@ mainは制限しない。これはbuilt-in tool policyでありsandboxではな�
 ## 9. Files
 
 ```text
+src/bash-fence.ts     DETOUR built-in Bash platform fence
 src/index.ts          command routing, merge, tool policy
 src/live-sessions.ts  AgentSessionRuntime/InteractiveMode host and terminal handoff
 src/session-logic.ts  pure routing/policy/parser helpers
@@ -123,6 +134,9 @@ Automated:
 
 - command parsing and contextual dispatch decisions
 - restricted tool classification
+- shell quoting、native launcher argument/mount ordering、unsupported platform fail-closed
+- platform backend integration（outside I/O、workspace create/modify/delete/rename、descendant/symlink、command prefix、`BASH_ENV`、timeout/abort、macOS ancestor rename、Linux `/proc` isolation）
+- first inline factoryの`bash` override登録、file extension競合のfail-closed、`user_bash`非interception
 - final handoff selection
 - complete CLI resource/source and extension-flag inheritance
 - runtime ownership mapping and main replacement policy
@@ -137,7 +151,7 @@ Manual real-terminal smoke:
 3. 両sessionで通常のPi transcript、editor、tool renderer、extension UIが表示される。
 4. regular/fullscreenの両方で `/detour` switchとchild closeを繰り返し、raw mode/cursor/keyboard protocolが壊れず、terminal titleがactive sessionからmainへ復元される。
 5. DETOURのみ `/merge`、`/close`、`/main` が存在し、TUI role indicatorが正しい。
-6. childのbash/edit/writeがblockされ、mainでは実行できる。
+6. childのedit/writeがblockされ、built-in Bashはoutside writeとworkspace readに成功しworkspace writeに失敗する。mainと明示的な `!` / `!!` は制限されない。
 7. merge、send、close、quit、reload、SIGTERM/SIGHUPを確認する。
 
 ## 11. 残存リスク
@@ -145,7 +159,7 @@ Manual real-terminal smoke:
 - `InteractiveMode.ui`、`start()` / `stop()` / `updateTerminalTitle()`、child instanceのprivate `shutdown()` / `registerSignalHandlers()` patch、およびbuilt-in provider parity用の `dist/extensions/index.js` はPi implementation detailであり、Pi updateで壊れ得る。
 - Pi coreはまだ複数live sessionのpublic focus APIを提供していない。
 - hidden extensionがmodal UIやterminal title/progressを直接操作する場合、terminal ownershipと競合する可能性がある。
-- detour custom tools/commandsとexternal processの副作用はblockできない。
+- Bash fenceはcomplete sandboxではなくpath/mount accident preventionである。hard link、alternate mount、IPC、same-process custom tools/extensions、concurrent main、external processのwriteはblockできない。
 - IME、paste、scroll、terminal recoveryは実端末確認が必要。
 
 ## 12. References
