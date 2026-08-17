@@ -263,7 +263,7 @@ describe("Bash fence process handling", () => {
 
       try {
         const result = await operations.exec(
-          "(sleep 0.02; printf first; sleep 0.06; printf second; sleep 2) &",
+          "nohup /bin/bash -c 'printf first; sleep 0.06; printf second; sleep 2' &",
           workspace,
           {
             onData: (chunk) => chunks.push(chunk),
